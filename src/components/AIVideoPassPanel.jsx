@@ -657,6 +657,14 @@ function cardFromAIVideoJob(job, isExploration = false) {
   };
 }
 
+function videoPassCardKey(card) {
+  const source = card?.sourceVideo || {};
+  const sourceKey = source.fingerprint || source.path || source.filename || source.label || "";
+  const start = Math.round(Number(card?.window?.start || 0) * 10);
+  const end = Math.round(Number(card?.window?.end || 0) * 10);
+  return `${sourceKey}:${start}:${end}`;
+}
+
 async function runBackgroundAIVideoReview({ aiPayload, cardMeta, session, recordType, label, onProgress }) {
   const route = recordType === "body_exploration"
     ? `/ai-annotation?type=body_exploration&id=${encodeURIComponent(session.id)}`
@@ -862,6 +870,7 @@ export default function AIVideoPassPanel({
   const [running, setRunning] = useState(false);
   const [status, setStatus] = useState("");
   const [cards, setCards] = useState([]);
+  const [dismissedSuggestionKeys, setDismissedSuggestionKeys] = useState(new Set());
   const [error, setError] = useState("");
   const [expanded, setExpanded] = useState({});
   const [acceptedIds, setAcceptedIds] = useState(new Set());
@@ -903,12 +912,13 @@ export default function AIVideoPassPanel({
         .filter((job) => job?.meta?.recordType === recordType)
         .map((job) => cardFromAIVideoJob(job, isExploration))
         .filter(Boolean)
+        .filter((card) => !dismissedSuggestionKeys.has(videoPassCardKey(card)))
         .sort((a, b) => Number(a.window?.start || 0) - Number(b.window?.start || 0));
       if (!completedCards.length) return;
       setCards((current) => {
-        const existingKeys = new Set(current.map((card) => `${card.sourceVideo?.fingerprint || card.sourceVideo?.path || ""}:${Math.round(Number(card.window?.start || 0) * 10)}:${Math.round(Number(card.window?.end || 0) * 10)}`));
+        const existingKeys = new Set(current.map((card) => videoPassCardKey(card)));
         const additions = completedCards.filter((card) => {
-          const key = `${card.sourceVideo?.fingerprint || card.sourceVideo?.path || ""}:${Math.round(Number(card.window?.start || 0) * 10)}:${Math.round(Number(card.window?.end || 0) * 10)}`;
+          const key = videoPassCardKey(card);
           if (existingKeys.has(key)) return false;
           existingKeys.add(key);
           return true;
@@ -920,7 +930,7 @@ export default function AIVideoPassPanel({
     } catch (err) {
       if (!quiet) setError(err?.message || "Could not refresh background video pass results.");
     }
-  }, [isExploration, recordType, session?.id]);
+  }, [dismissedSuggestionKeys, isExploration, recordType, session?.id]);
 
   useEffect(() => {
     refreshCompletedVideoPassJobs({ quiet: true });
@@ -946,6 +956,19 @@ export default function AIVideoPassPanel({
     setAcceptedIds(new Set());
     setAudioAccepted(false);
     setStatus(`Cleared ${storedAIPassEventCount} stored AI-generated annotation${storedAIPassEventCount === 1 ? "" : "s"} from this ${recordLabel}.`);
+  };
+
+  const clearSuggestedAIPassCards = () => {
+    const clearedCount = cards.length;
+    setDismissedSuggestionKeys((current) => {
+      const next = new Set(current);
+      cards.forEach((card) => next.add(videoPassCardKey(card)));
+      return next;
+    });
+    setCards([]);
+    setExpanded({});
+    setAcceptedIds(new Set());
+    setStatus(`Cleared ${clearedCount} suggested AI annotation card${clearedCount === 1 ? "" : "s"} from this review list.`);
   };
 
   const seekPreviewVideo = (seconds) => {
@@ -994,6 +1017,7 @@ export default function AIVideoPassPanel({
     if (!selectedVideo?.path || running) return;
     setRunning(true);
     setError("");
+    setDismissedSuggestionKeys(new Set());
     setCards([]);
     setAcceptedIds(new Set());
     try {
@@ -1461,6 +1485,30 @@ Return concise visual findings and 1-3 proposed timeline events only when the wi
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          {cards.length > 0 && (
+            <AlertDialog>
+              <AlertDialogTrigger asChild>
+                <Button type="button" variant="outline" className="h-8 border-destructive/30 text-destructive hover:bg-destructive/10">
+                  <Trash2 className="mr-2 h-3.5 w-3.5" />
+                  Clear Suggestions ({cards.length})
+                </Button>
+              </AlertDialogTrigger>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>Clear suggested AI annotations?</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    This removes the {cards.length} visible Sarah suggestion card{cards.length === 1 ? "" : "s"} from this review list. Accepted timeline events already saved to the {recordLabel} are kept.
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>Cancel</AlertDialogCancel>
+                  <AlertDialogAction onClick={clearSuggestedAIPassCards} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
+                    Clear suggestions
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
+          )}
           {storedAIPassEventCount > 0 && (
             <AlertDialog>
               <AlertDialogTrigger asChild>
@@ -1872,9 +1920,32 @@ Return concise visual findings and 1-3 proposed timeline events only when the wi
                   Saves all unaccepted Sarah video-pass finding cards and edited timeline events in this list.
                 </p>
               </div>
-              <Button type="button" size="sm" onClick={acceptAllDraftCards} className="h-8">
-                <Check className="mr-2 h-3.5 w-3.5" /> Accept All Findings & Events
-              </Button>
+              <div className="flex flex-wrap items-center gap-2">
+                <AlertDialog>
+                  <AlertDialogTrigger asChild>
+                    <Button type="button" size="sm" variant="outline" className="h-8 border-destructive/30 text-destructive hover:bg-destructive/10">
+                      <Trash2 className="mr-2 h-3.5 w-3.5" /> Clear Suggestions
+                    </Button>
+                  </AlertDialogTrigger>
+                  <AlertDialogContent>
+                    <AlertDialogHeader>
+                      <AlertDialogTitle>Clear suggested AI annotations?</AlertDialogTitle>
+                      <AlertDialogDescription>
+                        This removes all visible Sarah suggestion cards from this review list so you can rerun the pass cleanly. Accepted timeline events already saved to the {recordLabel} are kept.
+                      </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter>
+                      <AlertDialogCancel>Cancel</AlertDialogCancel>
+                      <AlertDialogAction onClick={clearSuggestedAIPassCards} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
+                        Clear suggestions
+                      </AlertDialogAction>
+                    </AlertDialogFooter>
+                  </AlertDialogContent>
+                </AlertDialog>
+                <Button type="button" size="sm" onClick={acceptAllDraftCards} className="h-8">
+                  <Check className="mr-2 h-3.5 w-3.5" /> Accept All Findings & Events
+                </Button>
+              </div>
             </div>
           )}
         </div>
