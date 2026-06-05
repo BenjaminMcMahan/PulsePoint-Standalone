@@ -12,12 +12,28 @@ import { getMotionEvidenceDigest, getMotionEvidenceSummary } from "@/utils/sessi
 import { buildSessionAIContentMeta, formatGeneratedAt, isSessionAIContentStale } from "@/utils/aiContentMetadata";
 import { repairAITextBlocks, repairCharacterSplitParagraph } from "@/utils/aiTextRepair";
 import { buildSessionHrvEvidence, RR_HRV_INTERPRETATION_RULES } from "@/utils/hrvEvidence";
+import { formatSecondsAsMinutesSeconds, fmtSecondsInText } from "@/utils/formatSeconds";
+
+function formatTimeWords(seconds) {
+  return formatSecondsAsMinutesSeconds(seconds);
+}
+
+function formatTimeStamp(seconds) {
+  return formatSecondsAsMinutesSeconds(seconds, { compact: true });
+}
+
+function formatTimingLabel(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "?";
+  return `${formatTimeWords(number)} (${formatTimeStamp(number)})`;
+}
+
 function buildSessionContext(session, timelineRows) {
   const hrMin = timelineRows.length ? Math.round(Math.min(...timelineRows.map(r => Number(r.hr)))) : null;
   const hrMax = timelineRows.length ? Math.round(Math.max(...timelineRows.map(r => Number(r.hr)))) : null;
   return [
     `Session date: ${session.date?.slice(0, 10)}`,
-    `Duration: ${session.duration_minutes ?? "?"}min`,
+    `Duration: ${session.duration_minutes != null ? `${session.duration_minutes} minute${Number(session.duration_minutes) === 1 ? "" : "s"}` : "?"}`,
     `Methods: ${(session.methods || []).join(", ")}`,
     session.foley_size ? `Foley: ${session.foley_size}Fr ${session.foley_type || ""}` : null,
     session.estim_notes ? `E-Stim notes: ${session.estim_notes}` : null,
@@ -49,11 +65,11 @@ function buildSessionContext(session, timelineRows) {
     `Climax duration: ${session.climax_duration ?? "?"}`,
     `Mood: ${session.mood}, Hydration: ${session.hydration}`,
     hrMin != null ? `HR: min ${hrMin}, avg ${session.avg_hr ?? "?"}, max ${hrMax}, at climax ${session.hr_at_climax ?? "?"}` : null,
-    session.pre_climax_offset_s != null ? `Phase markers: pre-climax ${Math.round(session.pre_climax_offset_s)}s, climax ${Math.round(session.climax_offset_s)}s, recovery ${session.recovery_offset_s != null ? Math.round(session.recovery_offset_s) + "s" : "?"}` : null,
+    session.pre_climax_offset_s != null ? `Phase markers: pre-climax ${formatTimingLabel(session.pre_climax_offset_s)}, climax ${formatTimingLabel(session.climax_offset_s)}, recovery ${session.recovery_offset_s != null ? formatTimingLabel(session.recovery_offset_s) : "?"}` : null,
     session.ejaculate_volume ? `Ejaculate: ${session.ejaculate_volume}` : null,
     session.unusual_sensations ? `Unusual sensations: ${session.unusual_sensations}` : null,
     (session.discomfort_entries || []).length ? `Discomfort: ${session.discomfort_entries.map(e => `sev ${e.severity}/10 — ${e.note}`).join("; ")}` : null,
-    (session.event_timeline || []).length ? `Events: ${session.event_timeline.map(e => `[${e.time_s}s] ${e.note}`).join(" | ")}` : null,
+    (session.event_timeline || []).length ? `Events: ${session.event_timeline.map(e => `[${formatTimingLabel(e.time_s)}] ${e.note}`).join(" | ")}` : null,
     session.notes ? `Session notes: ${session.notes}` : null,
     buildSessionVisualEvidenceDigest(session),
     buildSessionVideoPassDigest(session),
@@ -158,11 +174,11 @@ function isNewerCompletedJob(job, savedResult) {
 function toAnalysisTextArray(value) {
   if (Array.isArray(value)) {
     return value
-      .map((item) => repairCharacterSplitParagraph(String(item || "").trim()))
+      .map((item) => fmtSecondsInText(repairCharacterSplitParagraph(String(item || "").trim())))
       .filter(Boolean);
   }
   if (typeof value === "string") {
-    const repaired = repairCharacterSplitParagraph(value.trim());
+    const repaired = fmtSecondsInText(repairCharacterSplitParagraph(value.trim()));
     return repaired ? [repaired] : [];
   }
   return [];
@@ -172,7 +188,7 @@ function normalizeAnalysisShape(value) {
   if (!value || typeof value !== "object") return value;
   return {
     ...value,
-    summary: typeof value.summary === "string" ? repairCharacterSplitParagraph(value.summary) : value.summary,
+    summary: typeof value.summary === "string" ? fmtSecondsInText(repairCharacterSplitParagraph(value.summary)) : value.summary,
     arousal_arc: toAnalysisTextArray(value.arousal_arc),
     phase_analysis: toAnalysisTextArray(value.phase_analysis),
     event_analysis: toAnalysisTextArray(value.event_analysis),
@@ -365,9 +381,9 @@ export default function SessionAIPanel({ session, timelineRows, emgRows = [], us
         // Detect clipping
         const leftClipPct = leftPcts.length ? Math.round((leftPcts.filter((v) => v >= 99).length / leftPcts.length) * 100) : 0;
         const rightClipPct = rightPcts.length ? Math.round((rightPcts.filter((v) => v >= 99).length / rightPcts.length) * 100) : 0;
-        // Trajectory (sampled as "time_s:pct" pairs)
-        const leftTraj = sampled.filter((r) => r.left_pct != null).map((r) => `${r.time_s.toFixed(1)}s:${Math.round(r.left_pct)}%`).join(" ");
-        const rightTraj = sampled.filter((r) => r.right_pct != null).map((r) => `${r.time_s.toFixed(1)}s:${Math.round(r.right_pct)}%`).join(" ");
+        // Trajectory sampled as readable time labels to keep AI output out of raw seconds.
+        const leftTraj = sampled.filter((r) => r.left_pct != null).map((r) => `${formatTimingLabel(r.time_s)}: ${Math.round(r.left_pct)}%`).join(" | ");
+        const rightTraj = sampled.filter((r) => r.right_pct != null).map((r) => `${formatTimingLabel(r.time_s)}: ${Math.round(r.right_pct)}%`).join(" | ");
         return {
           channel_mode: "dual",
           total_samples: emgRows.length,
@@ -400,7 +416,7 @@ export default function SessionAIPanel({ session, timelineRows, emgRows = [], us
         const pcts = sampled.map((r) => r.level_pct).filter((v) => v != null);
         const avg = (arr) => arr.length ? Math.round(arr.reduce((a, b) => a + b, 0) / arr.length) : null;
         const clipPct = pcts.length ? Math.round((pcts.filter((v) => v >= 99).length / pcts.length) * 100) : 0;
-        const traj = sampled.filter((r) => r.level_pct != null).map((r) => `${r.time_s.toFixed(1)}s:${Math.round(r.level_pct)}%`).join(" ");
+        const traj = sampled.filter((r) => r.level_pct != null).map((r) => `${formatTimingLabel(r.time_s)}: ${Math.round(r.level_pct)}%`).join(" | ");
         return {
           channel_mode: "single",
           total_samples: emgRows.length,
@@ -429,7 +445,7 @@ export default function SessionAIPanel({ session, timelineRows, emgRows = [], us
 
     const hrSummary = timelineRows.length > 0 ? {
       total_points: timelineRows.length,
-      duration_s: Math.round(Math.max(...timelineRows.map(r => Number(r.time_offset_s) || 0))),
+      duration: formatTimingLabel(Math.max(...timelineRows.map(r => Number(r.time_offset_s) || 0))),
       hr_min: Math.round(Math.min(...timelineRows.map(r => Number(r.hr)))),
       hr_avg: Math.round(timelineRows.reduce((sum, row) => sum + Number(row.hr), 0) / timelineRows.length),
       hr_max: Math.round(Math.max(...timelineRows.map(r => Number(r.hr)))),
@@ -442,8 +458,8 @@ export default function SessionAIPanel({ session, timelineRows, emgRows = [], us
       const step = Math.max(1, Math.floor(timelineRows.length / 60));
       return timelineRows
         .filter((_, i) => i % step === 0)
-        .map(r => `${Math.round(Number(r.time_offset_s))}s:${Math.round(Number(r.hr))}`)
-        .join("  ");
+        .map(r => `${formatTimingLabel(r.time_offset_s)}: ${Math.round(Number(r.hr))} beats per minute`)
+        .join(" | ");
     })();
 
     // Build a sorted HR lookup from timeline rows for nearest-HR matching
@@ -458,14 +474,6 @@ export default function SessionAIPanel({ session, timelineRows, emgRows = [], us
         if (Number(r.time_offset_s) > time_s + 10) break; // past the window, stop early
       }
       return Math.round(Number(best.hr));
-    };
-
-    const formatTimeWords = (seconds) => {
-      const m = Math.floor(seconds / 60);
-      const s = Math.round(seconds % 60);
-      if (m === 0) return `${s} second${s !== 1 ? 's' : ''}`;
-      if (s === 0) return `${m} minute${m !== 1 ? 's' : ''}`;
-      return `${m} minute${m !== 1 ? 's' : ''} and ${s} second${s !== 1 ? 's' : ''}`;
     };
 
     const eventTimeline = (session.event_timeline || []).map(e => {
@@ -592,6 +600,8 @@ ${hrvIntegrationRules}
 
 CRITICAL FOR TEXT-TO-SPEECH QUALITY:
 - Write all times as words: "ten minutes and thirty seconds" not "10:30"
+- Never write large raw seconds such as "750 seconds", "1,200 seconds", "750s", or "time_s". Convert every duration and timestamp to minutes and seconds.
+- For display-style parentheticals, "twelve minutes and thirty seconds (12m 30s)" is acceptable. Raw seconds are not.
 - Spell out all numbers as words (e.g., "ten beats per minute" not "10 bpm")
 - Write in conversational, sentence-based prose with natural pauses
 - Use short sentences and simple grammar optimized for audio readability
@@ -612,10 +622,10 @@ Use time references when they anchor the arc, but each time reference should ans
 The best output should feel like: "Here is what was happening in the body during this phase, here is why this stimulation/body cue mattered, and here is how it shaped the next phase" — not "at this timestamp, then at this timestamp."`
   : `This is primary evidence for the single Chronological Deep Dive. Group closely related events into meaningful body-state transitions rather than narrating every note separately. At each major transition, explain what the body appears to be doing and why that matters. Reserve movement telemetry synthesis, recurring patterns, hypotheses, and recommendations for their dedicated sections; do not retell this timeline there.`}` : ""}
 
-${hrTrajectory ? `HR TRAJECTORY (time_s:bpm, sampled):
+${hrTrajectory ? `HEART-RATE TRAJECTORY (sampled with minute-and-second time labels):
 ${hrTrajectory}
 
-Use this to trace sympathetic activation patterns, body-state transitions, exploratory response, arousal plateaus when relevant, and correlation between HR changes and event timing. For non-climax body exploration sessions, HR still matters: use it to describe autonomic response, settling, activation, comfort/discomfort, or positional/sensory response rather than looking for a climax arc.` : ""}
+Use this to trace sympathetic activation patterns, body-state transitions, exploratory response, arousal plateaus when relevant, and correlation between HR changes and event timing. For non-climax body exploration sessions, HR still matters: use it to describe autonomic response, settling, activation, comfort/discomfort, or positional/sensory response rather than looking for a climax arc. When referencing any point from this trajectory, keep the minute-and-second time label; do not convert it back into raw seconds.` : ""}
 
 ${hrvEvidence ? `RR-DERIVED HRV EVIDENCE (interpret in context; do not dump numbers):
 ${JSON.stringify(hrvEvidence, null, 2)}
@@ -673,20 +683,21 @@ ${JSON.stringify({
     timeline_derived_avg: hrSummary.hr_avg,
     timeline_derived_max: hrSummary.hr_max,
     timeline_derived_min: hrSummary.hr_min,
+    timeline_duration: hrSummary.duration,
     hr_at_climax: session.hr_at_climax,
     ...(session.avg_hr != null && Number(session.avg_hr) !== hrSummary.hr_avg ? { stored_summary_avg: session.avg_hr } : {}),
     ...(session.max_hr != null && Number(session.max_hr) !== hrSummary.hr_max ? { stored_summary_max: session.max_hr } : {}),
   } : undefined,
   rr_derived_hrv: hrvEvidence || undefined,
-  phase_markers_s: {
-    pre_climax: session.pre_climax_offset_s,
-    climax: session.climax_offset_s,
-    recovery: session.recovery_offset_s,
+  phase_markers: {
+    pre_climax: session.pre_climax_offset_s != null ? formatTimingLabel(session.pre_climax_offset_s) : undefined,
+    climax: session.climax_offset_s != null ? formatTimingLabel(session.climax_offset_s) : undefined,
+    recovery: session.recovery_offset_s != null ? formatTimingLabel(session.recovery_offset_s) : undefined,
   },
 }, null, 2)}
 
 ${session.discomfort_entries?.length > 0 ? "Discomfort entries present — analyze each for likely anatomical cause (nerve, tissue, positional), severity context, and whether it disrupted the arousal arc." : ""}
-${emgSummary ? `\nEMG DATA:\n${JSON.stringify(emgSummary, null, 2)}\n\nAnalyze EMG activation patterns alongside HR. Reference timing relationships between EMG and HR changes. Check for clipping, asymmetry, noise, and relate activation bursts to event markers and phase markers when present. Describe what muscle the sensor likely captures based on placement notes and target area.` : ""}
+${emgSummary ? `\nEMG DATA:\n${JSON.stringify(emgSummary, null, 2)}\n\nAnalyze EMG activation patterns alongside HR. Reference timing relationships between EMG and HR changes using minute-and-second time labels. Check for clipping, asymmetry, noise, and relate activation bursts to event markers and phase markers when present. Describe what muscle the sensor likely captures based on placement notes and target area.` : ""}
 ${journalContext}
 
 Provide ${isTechnical

@@ -1,4 +1,5 @@
 import { splitSentencesPreservingDecimals } from "@/utils/aiTextRepair";
+import { fmtSecondsInText } from "@/utils/formatSeconds";
 import TTSReader from "./TTSReader";
 
 export function renderSentenceHighlightedText(text, activeSentenceIdx = -1, onSentenceClick) {
@@ -62,7 +63,7 @@ export default function AIOutputReader({
   sourceGeneratedAt,
   summaryColor = "hsl(var(--primary))",
 }) {
-  const safeParagraphs = (paragraphs || []).filter(Boolean);
+  const safeParagraphs = (paragraphs || []).filter(Boolean).map((paragraph) => fmtSecondsInText(paragraph));
 
   return (
     <TTSReader
