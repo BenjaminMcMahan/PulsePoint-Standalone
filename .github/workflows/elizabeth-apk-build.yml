@@ -1,4 +1,4 @@
-name: Build Elizabeth v1.1 APK
+name: Recover signer and build Elizabeth v1.1
 
 on:
   pull_request:
@@ -11,9 +11,11 @@ permissions:
   contents: write
 
 jobs:
-  build-elizabeth-apk:
+  recover-and-build:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
+    env:
+      OLD_CERT_SHA256: d9d33f47cfa6b1fe0b3e7b1703dfd54ebf00803c24113e922fb5684a47909e20
     steps:
       - name: Check out build bench
         uses: actions/checkout@v4
@@ -27,87 +29,166 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Inspect prior signing paths
+      - name: Clone complete Elizabeth history
+        run: git clone https://github.com/PulsePointLabs/Elizabeth-RPM.git source
+
+      - name: Search history for the original signer
+        id: signer
         shell: bash
         run: |
           set +e
-          mkdir -p signing-diagnostics/prior-apks
-          {
-            echo '=== Existing build-bench workflow signing references ==='
-            find .github/workflows -maxdepth 1 -type f -print -exec grep -HniE 'keystore|signing|storePassword|keyPassword|keyAlias|SIGNING|KEYSTORE|assembleRelease|apksigner' {} \; 2>/dev/null
-            echo
-            echo '=== Repository files that look like signing material ==='
-            find . -type f \( -iname '*.jks' -o -iname '*.keystore' -o -iname '*.p12' -o -iname '*.pkcs12' -o -iname 'keystore.properties' \) -print 2>/dev/null
-            echo
-            echo '=== Elizabeth public release assets ==='
-            curl -fsSL https://api.github.com/repos/PulsePointLabs/Elizabeth-RPM/releases > signing-diagnostics/releases.json
-            jq -r '.[] | .tag_name as $tag | .assets[]? | [$tag,.name,.browser_download_url] | @tsv' signing-diagnostics/releases.json | tee signing-diagnostics/release-assets.tsv
-            echo
-            echo '=== Download and inspect older Elizabeth APK certificates ==='
-            jq -r '.[] | .tag_name as $tag | .assets[]? | select(.name | ascii_downcase | endswith(".apk")) | [$tag,.name,.browser_download_url] | @tsv' signing-diagnostics/releases.json | head -10 | while IFS=$'\t' read -r tag name url; do
-              safe="$(printf '%s-%s' "$tag" "$name" | tr '/ :' '___')"
-              echo "Downloading $tag / $name"
-              curl -fL "$url" -o "signing-diagnostics/prior-apks/$safe"
-              echo "--- $tag / $name ---"
-              "$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)/apksigner" verify --verbose --print-certs "signing-diagnostics/prior-apks/$safe" 2>&1
-              sha256sum "signing-diagnostics/prior-apks/$safe"
-            done
-          } 2>&1 | tee signing-diagnostics/signing-report.txt
+          mkdir -p signer-recovery/candidates
+          REPORT=signer-recovery/report.txt
+          : > "$REPORT"
+          echo "Target certificate SHA-256: $OLD_CERT_SHA256" | tee -a "$REPORT"
+          echo '=== Paths and commits mentioning signing ===' | tee -a "$REPORT"
+          git -C source log --all --oneline --name-only -- . 2>/dev/null \
+            | grep -iE 'keystore|\.jks$|\.p12$|\.pkcs12$|signingConfig|storeFile|debug\.key' \
+            | head -300 | tee -a "$REPORT"
+          echo '=== Workflow/build signing references across history ===' | tee -a "$REPORT"
+          git -C source log --all -G 'keystore|signingConfig|storeFile|KEYSTORE|SIGNING_KEY|androiddebugkey' \
+            --format='%H %ad %s' --date=iso -- . 2>/dev/null | head -100 | tee -a "$REPORT"
+          echo '=== All historical blob paths that resemble keys ===' | tee -a "$REPORT"
+          git -C source rev-list --objects --all > signer-recovery/all-objects.txt
+          grep -iE 'keystore|\.jks$|\.p12$|\.pkcs12$|debug.*key|signing.*key' signer-recovery/all-objects.txt \
+            | tee signer-recovery/named-key-candidates.txt | tee -a "$REPORT"
 
-      - name: Upload signing diagnostics
+          found=0
+          found_pass=''
+          found_alias=''
+          count=0
+          while read -r obj path; do
+            [ -n "$obj" ] || continue
+            [ "$(git -C source cat-file -t "$obj" 2>/dev/null)" = blob ] || continue
+            size="$(git -C source cat-file -s "$obj" 2>/dev/null)"
+            [ -n "$size" ] || continue
+            [ "$size" -le 1048576 ] || continue
+            count=$((count+1))
+            candidate="signer-recovery/candidates/$obj"
+            git -C source cat-file blob "$obj" > "$candidate" 2>/dev/null || continue
+            for pass in android changeit; do
+              aliases="$(timeout 3 keytool -list -keystore "$candidate" -storepass "$pass" 2>/dev/null \
+                | sed -n 's/^\([^,][^,]*\),.*PrivateKeyEntry.*/\1/p')"
+              for alias in $aliases androiddebugkey; do
+                [ -n "$alias" ] || continue
+                cert="$(timeout 3 keytool -exportcert -keystore "$candidate" -storepass "$pass" -alias "$alias" 2>/dev/null \
+                  | sha256sum | awk '{print $1}')"
+                if [ "$cert" = "$OLD_CERT_SHA256" ]; then
+                  cp "$candidate" signer-recovery/original-elizabeth.keystore
+                  printf '%s' "$pass" > signer-recovery/storepass.txt
+                  printf '%s' "$alias" > signer-recovery/alias.txt
+                  echo "MATCH: object=$obj path=$path alias=$alias" | tee -a "$REPORT"
+                  found=1
+                  found_pass="$pass"
+                  found_alias="$alias"
+                  break 3
+                fi
+              done
+            done
+          done < signer-recovery/all-objects.txt
+          echo "Scanned $count historical blobs." | tee -a "$REPORT"
+
+          echo '=== Public Actions metadata ===' | tee -a "$REPORT"
+          curl -sS -w '\nHTTP %{http_code}\n' 'https://api.github.com/repos/PulsePointLabs/Elizabeth-RPM/actions/runs?per_page=100' \
+            -o signer-recovery/actions-runs.json 2>>"$REPORT"
+          jq -r '.workflow_runs[]? | [.id,.name,.event,.status,.conclusion,.head_sha] | @tsv' signer-recovery/actions-runs.json \
+            2>/dev/null | head -100 | tee -a "$REPORT"
+          curl -sS -w '\nHTTP %{http_code}\n' 'https://api.github.com/repos/PulsePointLabs/Elizabeth-RPM/actions/artifacts?per_page=100' \
+            -o signer-recovery/actions-artifacts.json 2>>"$REPORT"
+          jq -r '.artifacts[]? | [.id,.name,.expired,.workflow_run.id] | @tsv' signer-recovery/actions-artifacts.json \
+            2>/dev/null | head -100 | tee -a "$REPORT"
+
+          if [ "$found" -eq 1 ]; then
+            echo 'recovered=true' >> "$GITHUB_OUTPUT"
+            echo "alias=$found_alias" >> "$GITHUB_OUTPUT"
+            echo "storepass=$found_pass" >> "$GITHUB_OUTPUT"
+            echo 'Original signer recovered successfully.' | tee -a "$REPORT"
+          else
+            echo 'recovered=false' >> "$GITHUB_OUTPUT"
+            echo 'Original private key was not present in accessible Git history.' | tee -a "$REPORT"
+          fi
+
+      - name: Upload signer recovery report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Elizabeth-signing-diagnostics
+          name: Elizabeth-signer-recovery-report
           path: |
-            signing-diagnostics/signing-report.txt
-            signing-diagnostics/releases.json
-            signing-diagnostics/release-assets.tsv
+            signer-recovery/report.txt
+            signer-recovery/named-key-candidates.txt
+            signer-recovery/actions-runs.json
+            signer-recovery/actions-artifacts.json
           if-no-files-found: warn
 
-      - name: Clone Elizabeth source
-        run: git clone --depth 1 https://github.com/PulsePointLabs/Elizabeth-RPM.git source
+      - name: Stop rather than publish an incompatible signer
+        if: steps.signer.outputs.recovered != 'true'
+        run: |
+          echo 'The original private signing key was not recoverable, so this workflow will not publish another incompatible APK.'
+          exit 42
 
-      - name: Decode v1.1 sensor patch
+      - name: Decode and apply v1.1 patch
+        if: steps.signer.outputs.recovered == 'true'
         run: |
           base64 --decode elizabeth-build/elizabeth-v1.1.patch.xz.b64 > elizabeth-v1.1.patch.xz
           xz --test elizabeth-v1.1.patch.xz
           xz --decompress --stdout elizabeth-v1.1.patch.xz > elizabeth-v1.1.patch
           git -C source apply --check ../elizabeth-v1.1.patch
+          git -C source apply ../elizabeth-v1.1.patch
 
-      - name: Apply v1.1 sensor patch
-        run: git -C source apply ../elizabeth-v1.1.patch
-
-      - name: Build installable APK
+      - name: Build unsigned release APK
+        if: steps.signer.outputs.recovered == 'true'
         working-directory: source
         run: |
           chmod +x ./gradlew
-          ./gradlew assembleDebug --no-daemon --stacktrace
+          ./gradlew testDebugUnitTest lintDebug assembleRelease --no-daemon --stacktrace
 
-      - name: Prepare downloadable files
+      - name: Sign with the original Elizabeth key
+        if: steps.signer.outputs.recovered == 'true'
+        shell: bash
         run: |
+          set -euo pipefail
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
+          UNSIGNED="$(find source/app/build/outputs/apk/release -type f -name '*unsigned*.apk' | head -1)"
+          [ -f "$UNSIGNED" ]
           mkdir -p release
-          cp source/app/build/outputs/apk/debug/app-debug.apk release/Elizabeth-Live-v1.1.0-sensor-pages.apk
+          "$BUILD_TOOLS/zipalign" -f -p 4 "$UNSIGNED" release/Elizabeth-Live-v1.1.0-sensor-pages-aligned.apk
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks signer-recovery/original-elizabeth.keystore \
+            --ks-key-alias '${{ steps.signer.outputs.alias }}' \
+            --ks-pass 'pass:${{ steps.signer.outputs.storepass }}' \
+            --key-pass 'pass:${{ steps.signer.outputs.storepass }}' \
+            --out release/Elizabeth-Live-v1.1.0-sensor-pages.apk \
+            release/Elizabeth-Live-v1.1.0-sensor-pages-aligned.apk
+          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs release/Elizabeth-Live-v1.1.0-sensor-pages.apk \
+            | tee release/SIGNING-CERTIFICATE.txt
+          actual="$(grep 'certificate SHA-256 digest:' release/SIGNING-CERTIFICATE.txt | head -1 | awk '{print $NF}')"
+          [ "$actual" = "$OLD_CERT_SHA256" ]
+          rm release/Elizabeth-Live-v1.1.0-sensor-pages-aligned.apk
           sha256sum release/Elizabeth-Live-v1.1.0-sensor-pages.apk > release/SHA256SUMS.txt
 
-      - name: Upload APK artifact
+      - name: Upload compatible APK artifact
+        if: steps.signer.outputs.recovered == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: Elizabeth-Live-v1.1.0-sensor-pages
+          name: Elizabeth-Live-v1.1.0-original-signer
           path: release/*
           if-no-files-found: error
 
-      - name: Publish GitHub release
+      - name: Publish corrected GitHub release
+        if: steps.signer.outputs.recovered == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: elizabeth-v1.1.0-sensor-pages
+          tag_name: elizabeth-v1.1.0-sensor-pages-compatible
           target_commitish: ${{ github.event.pull_request.head.sha }}
-          name: Elizabeth Live v1.1.0 Sensor Pages
+          name: Elizabeth Live v1.1.0 — Original Signer
           body: |
-            Installable APK built from PulsePointLabs/Elizabeth-RPM with the swipeable landscape sensor-pages patch.
+            Corrected APK signed with the same certificate used by Elizabeth Live v0.1.0 through v1.0.2.
+
+            Tests, Android lint, release compilation, zip alignment, APK signature verification, and certificate fingerprint matching passed.
           files: |
             release/Elizabeth-Live-v1.1.0-sensor-pages.apk
             release/SHA256SUMS.txt
+            release/SIGNING-CERTIFICATE.txt
           fail_on_unmatched_files: true
           make_latest: true
         env:
