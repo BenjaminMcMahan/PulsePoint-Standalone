@@ -29,9 +29,41 @@ jobs:
       - name: Clone Elizabeth source
         run: git clone --depth 1 https://github.com/PulsePointLabs/Elizabeth-RPM.git source
 
-      - name: Decode and apply v1.1 sensor patch
+      - name: Decode and inspect v1.1 sensor patch
+        shell: bash
         run: |
-          base64 --decode elizabeth-build/elizabeth-v1.1.patch.xz.b64 | xz --decompress > elizabeth-v1.1.patch
+          set +e
+          {
+            echo '--- encoded file ---'
+            wc -c elizabeth-build/elizabeth-v1.1.patch.xz.b64
+            sha256sum elizabeth-build/elizabeth-v1.1.patch.xz.b64
+            base64 --decode elizabeth-build/elizabeth-v1.1.patch.xz.b64 > elizabeth-v1.1.patch.xz
+            echo "base64_status=$?"
+            echo '--- xz file ---'
+            wc -c elizabeth-v1.1.patch.xz
+            sha256sum elizabeth-v1.1.patch.xz
+            xz --test elizabeth-v1.1.patch.xz
+            echo "xz_test_status=$?"
+            xz --decompress --stdout elizabeth-v1.1.patch.xz > elizabeth-v1.1.patch
+            echo "xz_decode_status=$?"
+            echo '--- decoded patch ---'
+            wc -c elizabeth-v1.1.patch
+            sha256sum elizabeth-v1.1.patch
+            git -C source apply --check --verbose ../elizabeth-v1.1.patch
+            echo "git_apply_check_status=$?"
+          } 2>&1 | tee patch-debug.log
+
+      - name: Upload patch diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Elizabeth-patch-diagnostics
+          path: patch-debug.log
+          if-no-files-found: error
+
+      - name: Apply v1.1 sensor patch
+        run: |
+          xz --test elizabeth-v1.1.patch.xz
           git -C source apply --check ../elizabeth-v1.1.patch
           git -C source apply ../elizabeth-v1.1.patch
 
