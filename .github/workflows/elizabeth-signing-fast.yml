@@ -1,0 +1,58 @@
+name: Fast Elizabeth signer scan
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/elizabeth-signing-fast.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  fast-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Clone complete Elizabeth history
+        run: git clone https://github.com/PulsePointLabs/Elizabeth-RPM.git source
+      - name: Inspect signing history and Actions metadata
+        shell: bash
+        run: |
+          set +e
+          mkdir fast-signing-scan
+          REPORT=fast-signing-scan/report.txt
+          {
+            echo '=== Current source tree signing-like files ==='
+            find source -type f \( -iname '*keystore*' -o -iname '*.jks' -o -iname '*.p12' -o -iname '*.pkcs12' \) -print
+            echo
+            echo '=== Historical object paths matching signing material ==='
+            git -C source rev-list --objects --all | grep -iE 'keystore|\.jks$|\.p12$|\.pkcs12$|debug.*key|signing.*key'
+            echo
+            echo '=== Commits containing signing terms ==='
+            git -C source log --all -G 'keystore|signingConfig|storeFile|KEYSTORE|SIGNING_KEY|androiddebugkey' --format='%H %ad %s' --date=iso -- .
+            echo
+            echo '=== Every historical workflow file path ==='
+            git -C source log --all --name-only --format= -- .github/workflows | sort -u
+            echo
+            echo '=== Signing references from every reachable workflow version ==='
+            for commit in $(git -C source rev-list --all); do
+              for path in $(git -C source ls-tree -r --name-only "$commit" .github/workflows 2>/dev/null); do
+                git -C source show "$commit:$path" 2>/dev/null | grep -HniE 'keystore|signing|storePassword|keyPassword|keyAlias|assembleRelease|apksigner' && echo "commit=$commit path=$path"
+              done
+            done
+            echo
+            echo '=== Public Actions runs ==='
+            curl -fsSL 'https://api.github.com/repos/PulsePointLabs/Elizabeth-RPM/actions/runs?per_page=100' > fast-signing-scan/actions-runs.json
+            jq -r '.workflow_runs[]? | [.id,.name,.path,.event,.status,.conclusion,.head_sha,.created_at] | @tsv' fast-signing-scan/actions-runs.json
+            echo
+            echo '=== Public Actions artifacts ==='
+            curl -fsSL 'https://api.github.com/repos/PulsePointLabs/Elizabeth-RPM/actions/artifacts?per_page=100' > fast-signing-scan/actions-artifacts.json
+            jq -r '.artifacts[]? | [.id,.name,.expired,.workflow_run.id,.created_at] | @tsv' fast-signing-scan/actions-artifacts.json
+          } 2>&1 | tee "$REPORT"
+      - name: Upload fast report
+        uses: actions/upload-artifact@v4
+        with:
+          name: Elizabeth-fast-signing-scan
+          path: fast-signing-scan/*
