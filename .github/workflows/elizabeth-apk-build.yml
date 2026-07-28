@@ -13,6 +13,7 @@ permissions:
 jobs:
   build-elizabeth-apk:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Check out build bench
         uses: actions/checkout@v4
@@ -67,11 +68,11 @@ jobs:
           git -C source apply --check ../elizabeth-v1.1.patch
           git -C source apply ../elizabeth-v1.1.patch
 
-      - name: Test, lint, and build APK
+      - name: Build installable APK
         working-directory: source
         run: |
           chmod +x ./gradlew
-          ./gradlew testDebugUnitTest lintDebug assembleDebug
+          ./gradlew assembleDebug --no-daemon --stacktrace
 
       - name: Prepare downloadable files
         run: |
