@@ -1,0 +1,46 @@
+name: Publish Elizabeth Codex handoff URL
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/publish-elizabeth-codex-handoff-main.yml'
+      - 'codex-handoff-publish-trigger.txt'
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out handoff branch
+        uses: actions/checkout@v4
+        with:
+          ref: codex/elizabeth-v1.1-handoff
+
+      - name: Reassemble and verify handoff ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat codex-handoff/zip.b64.part* > handoff.zip.b64
+          base64 --decode handoff.zip.b64 > Elizabeth-Codex-Handoff-v1.1-CodexURL.zip
+          echo '311240613d0dec0e4792b1a69b5f3e5239446dd8d1fdfde94391588e3dcae17c  Elizabeth-Codex-Handoff-v1.1-CodexURL.zip' | sha256sum -c -
+          unzip -t Elizabeth-Codex-Handoff-v1.1-CodexURL.zip
+
+      - name: Publish direct-download GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: elizabeth-codex-handoff-v1.1
+          target_commitish: ${{ github.sha }}
+          name: Elizabeth Codex Handoff v1.1
+          body: |
+            Complete Elizabeth Live v1.1 Codex handoff.
+
+            Contains the full sensor-pages patch, modification notes, Codex prompt, signing recovery scripts, and persistent signing workflow. The unusable wrong-signer APK is intentionally omitted.
+          files: Elizabeth-Codex-Handoff-v1.1-CodexURL.zip
+          fail_on_unmatched_files: true
+          make_latest: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
