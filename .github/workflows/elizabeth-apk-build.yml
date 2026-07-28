@@ -87,14 +87,20 @@ jobs:
           path: release/*
           if-no-files-found: error
 
-      - name: Publish temporary GitHub release
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: elizabeth-v1.1.0-sensor-pages
+          target_commitish: ${{ github.event.pull_request.head.sha }}
+          name: Elizabeth Live v1.1.0 Sensor Pages
+          body: |
+            Installable debug-signed APK built from PulsePointLabs/Elizabeth-RPM with the swipeable landscape sensor-pages patch.
+
+            Unit tests, Android lint, and APK compilation passed in GitHub Actions.
+          files: |
+            release/Elizabeth-Live-v1.1.0-sensor-pages.apk
+            release/SHA256SUMS.txt
+          fail_on_unmatched_files: true
+          make_latest: true
         env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: elizabeth-v1.1.0-sensor-pages-build
-          TARGET_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          gh release delete "$TAG" --cleanup-tag --yes 2>/dev/null || true
-          gh release create "$TAG" release/* \
-            --target "$TARGET_SHA" \
-            --title "Elizabeth Live v1.1.0 Sensor Pages" \
-            --notes "Installable debug-signed APK built from PulsePointLabs/Elizabeth-RPM with the swipeable landscape sensor-pages patch."
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
