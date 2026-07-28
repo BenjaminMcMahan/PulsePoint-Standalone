@@ -13,7 +13,7 @@ permissions:
 jobs:
   build-elizabeth-apk:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - name: Check out build bench
         uses: actions/checkout@v4
@@ -27,46 +27,56 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Clone Elizabeth source
-        run: git clone --depth 1 https://github.com/PulsePointLabs/Elizabeth-RPM.git source
-
-      - name: Decode and inspect v1.1 sensor patch
+      - name: Inspect prior signing paths
         shell: bash
         run: |
           set +e
+          mkdir -p signing-diagnostics/prior-apks
           {
-            echo '--- encoded file ---'
-            wc -c elizabeth-build/elizabeth-v1.1.patch.xz.b64
-            sha256sum elizabeth-build/elizabeth-v1.1.patch.xz.b64
-            base64 --decode elizabeth-build/elizabeth-v1.1.patch.xz.b64 > elizabeth-v1.1.patch.xz
-            echo "base64_status=$?"
-            echo '--- xz file ---'
-            wc -c elizabeth-v1.1.patch.xz
-            sha256sum elizabeth-v1.1.patch.xz
-            xz --test elizabeth-v1.1.patch.xz
-            echo "xz_test_status=$?"
-            xz --decompress --stdout elizabeth-v1.1.patch.xz > elizabeth-v1.1.patch
-            echo "xz_decode_status=$?"
-            echo '--- decoded patch ---'
-            wc -c elizabeth-v1.1.patch
-            sha256sum elizabeth-v1.1.patch
-            git -C source apply --check --verbose ../elizabeth-v1.1.patch
-            echo "git_apply_check_status=$?"
-          } 2>&1 | tee patch-debug.log
+            echo '=== Existing build-bench workflow signing references ==='
+            find .github/workflows -maxdepth 1 -type f -print -exec grep -HniE 'keystore|signing|storePassword|keyPassword|keyAlias|SIGNING|KEYSTORE|assembleRelease|apksigner' {} \; 2>/dev/null
+            echo
+            echo '=== Repository files that look like signing material ==='
+            find . -type f \( -iname '*.jks' -o -iname '*.keystore' -o -iname '*.p12' -o -iname '*.pkcs12' -o -iname 'keystore.properties' \) -print 2>/dev/null
+            echo
+            echo '=== Elizabeth public release assets ==='
+            curl -fsSL https://api.github.com/repos/PulsePointLabs/Elizabeth-RPM/releases > signing-diagnostics/releases.json
+            jq -r '.[] | .tag_name as $tag | .assets[]? | [$tag,.name,.browser_download_url] | @tsv' signing-diagnostics/releases.json | tee signing-diagnostics/release-assets.tsv
+            echo
+            echo '=== Download and inspect older Elizabeth APK certificates ==='
+            jq -r '.[] | .tag_name as $tag | .assets[]? | select(.name | ascii_downcase | endswith(".apk")) | [$tag,.name,.browser_download_url] | @tsv' signing-diagnostics/releases.json | head -10 | while IFS=$'\t' read -r tag name url; do
+              safe="$(printf '%s-%s' "$tag" "$name" | tr '/ :' '___')"
+              echo "Downloading $tag / $name"
+              curl -fL "$url" -o "signing-diagnostics/prior-apks/$safe"
+              echo "--- $tag / $name ---"
+              "$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)/apksigner" verify --verbose --print-certs "signing-diagnostics/prior-apks/$safe" 2>&1
+              sha256sum "signing-diagnostics/prior-apks/$safe"
+            done
+          } 2>&1 | tee signing-diagnostics/signing-report.txt
 
-      - name: Upload patch diagnostics
+      - name: Upload signing diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Elizabeth-patch-diagnostics
-          path: patch-debug.log
-          if-no-files-found: error
+          name: Elizabeth-signing-diagnostics
+          path: |
+            signing-diagnostics/signing-report.txt
+            signing-diagnostics/releases.json
+            signing-diagnostics/release-assets.tsv
+          if-no-files-found: warn
+
+      - name: Clone Elizabeth source
+        run: git clone --depth 1 https://github.com/PulsePointLabs/Elizabeth-RPM.git source
+
+      - name: Decode v1.1 sensor patch
+        run: |
+          base64 --decode elizabeth-build/elizabeth-v1.1.patch.xz.b64 > elizabeth-v1.1.patch.xz
+          xz --test elizabeth-v1.1.patch.xz
+          xz --decompress --stdout elizabeth-v1.1.patch.xz > elizabeth-v1.1.patch
+          git -C source apply --check ../elizabeth-v1.1.patch
 
       - name: Apply v1.1 sensor patch
-        run: |
-          xz --test elizabeth-v1.1.patch.xz
-          git -C source apply --check ../elizabeth-v1.1.patch
-          git -C source apply ../elizabeth-v1.1.patch
+        run: git -C source apply ../elizabeth-v1.1.patch
 
       - name: Build installable APK
         working-directory: source
@@ -94,9 +104,7 @@ jobs:
           target_commitish: ${{ github.event.pull_request.head.sha }}
           name: Elizabeth Live v1.1.0 Sensor Pages
           body: |
-            Installable debug-signed APK built from PulsePointLabs/Elizabeth-RPM with the swipeable landscape sensor-pages patch.
-
-            Unit tests, Android lint, and APK compilation passed in GitHub Actions.
+            Installable APK built from PulsePointLabs/Elizabeth-RPM with the swipeable landscape sensor-pages patch.
           files: |
             release/Elizabeth-Live-v1.1.0-sensor-pages.apk
             release/SHA256SUMS.txt
