@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { BleClient } from "@capacitor-community/bluetooth-le";
-import { Activity, AlertTriangle, Brain, CheckCircle2, ChevronDown, CircleDot, ExternalLink, FileText, Flag, Footprints, HeartPulse, Maximize2, Mic, MicOff, Radio, RefreshCw, ScanSearch, SlidersHorizontal, Undo2, UploadCloud, Video, X, Zap } from "lucide-react";
+import { Activity, AlertTriangle, Brain, CheckCircle2, ChevronDown, CircleDot, ExternalLink, FileText, Flag, Footprints, HeartPulse, Maximize2, Mic, MicOff, Radio, RefreshCw, ScanSearch, SlidersHorizontal, Square, Undo2, UploadCloud, Video, X, Zap } from "lucide-react";
 import {
   CartesianGrid,
   Legend,
@@ -191,8 +191,8 @@ const HOWL_DEFAULT_CONTROL_FORM = {
   controlUrl: "",
   remoteAccessKey: "",
   intensityFloor: 0,
-  intensityCeiling: 20,
-  rampRateLimitPerSecond: 5,
+  intensityCeiling: 10,
+  rampRateLimitPerSecond: 2,
   buildRampEnabled: true,
   nearClimaxReductionEnabled: true,
   recoveryReductionEnabled: true,
@@ -1147,7 +1147,7 @@ export default function LiveCapture() {
     rrCount: 0,
   });
   const [hrLossDialog, setHrLossDialog] = useState(null);
-  const [captureKind, setCaptureKind] = useState(() => localStorage.getItem("pulsepoint.captureKind") || "session");
+  const [captureKind, setCaptureKind] = useState("session");
   const [captureKindError, setCaptureKindError] = useState("");
   const [captureMode, setCaptureMode] = useState(() => localStorage.getItem("pulsepoint.captureMode") || "full");
   const [emgSensorConfig, setEmgSensorConfig] = useState(() => localStorage.getItem("pulsepoint.emgSensorConfig") || "generic");
@@ -1579,6 +1579,8 @@ export default function LiveCapture() {
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.error || "Emergency stop was rejected.");
       setHowlCommandForm((prev) => ({ ...prev, intensity: 0, enabled: false }));
+      setHowlControlForm((prev) => ({ ...prev, sarahAutoEnabled: false }));
+      setHowlAutoStatus("Emergency stop sent. Sarah auto-control is disarmed.");
       setHowlControlStatus(data.dispatch?.message || "Emergency stop queued.");
       await refreshHowlTelemetry({ quiet: true });
       return data;
@@ -2080,7 +2082,6 @@ export default function LiveCapture() {
   }, []);
 
   useEffect(() => {
-    localStorage.setItem("pulsepoint.captureKind", captureKind);
     setCaptureKindError("");
     fetch(apiUrl("/live-capture/capture-kind"), {
       method: "POST",
@@ -2241,7 +2242,7 @@ export default function LiveCapture() {
   const howlEndpointText = `${apiUrl("/howl/telemetry").replace(/^https?:\/\/[^/]+/, "")}`;
   const howlControlEnabled = Boolean(howlControlForm.controlEnabled);
   const howlSarahAutoEnabled = Boolean(howlControlForm.sarahAutoEnabled);
-  const howlControlCeiling = readNumber(howlControlForm.intensityCeiling) ?? 20;
+  const howlControlCeiling = readNumber(howlControlForm.intensityCeiling) ?? 10;
   const howlControlFloor = readNumber(howlControlForm.intensityFloor) ?? 0;
   const howlHelperPollPath = apiUrl("/howl/control/next?client=howl-helper").replace(/^https?:\/\/[^/]+/, "");
   const howlControlUrlPreview = previewHowlControlUrl(howlControlForm.controlUrl);
@@ -2298,6 +2299,10 @@ export default function LiveCapture() {
       setHowlAutoStatus(howlManualControlsUnlocked ? "Sarah auto-control is off." : "Manual Howl control must be enabled and tested first.");
       return;
     }
+    if (!recordingActive) {
+      setHowlAutoStatus("Sarah is armed but cannot adjust Howl until OBS is recording.");
+      return;
+    }
     if (!hrTelemetry || !hrConnected) {
       setHowlAutoStatus("Sarah is armed, waiting for live HR/HRV.");
       return;
@@ -2323,6 +2328,12 @@ export default function LiveCapture() {
     const nearThreshold = readNumber(howlControlForm.nearClimaxThreshold) ?? 72;
     const buildThreshold = readNumber(howlControlForm.buildThreshold) ?? 32;
     const recoveryThreshold = readNumber(howlControlForm.recoveryThreshold) ?? 55;
+    const recentHr = telemetryHistory
+      .slice(-12)
+      .map((point) => readNumber(point.hr, point.hrSmoothed))
+      .filter((value) => value != null);
+    const hrTrend = recentHr.length >= 4 ? recentHr.at(-1) - recentHr[0] : null;
+    const physiologicallyBuilding = hrTrend != null && hrTrend >= 1 && prediction.recovery < Math.min(recoveryThreshold, 40);
 
     let target = currentIntensity;
     let reason = "";
@@ -2332,7 +2343,7 @@ export default function LiveCapture() {
     } else if (howlControlForm.nearClimaxReductionEnabled !== false && prediction.nearClimax >= nearThreshold) {
       target = Math.max(floor, currentIntensity - reduceStep);
       reason = `sarah_auto_near_climax_reduce near=${prediction.nearClimax} recovery=${prediction.recovery}`;
-    } else if (howlControlForm.buildRampEnabled !== false && prediction.nearClimax >= buildThreshold && prediction.nearClimax < Math.max(buildThreshold + 6, nearThreshold - 10)) {
+    } else if (howlControlForm.buildRampEnabled !== false && physiologicallyBuilding && prediction.nearClimax >= buildThreshold && prediction.nearClimax < Math.max(buildThreshold + 6, nearThreshold - 10)) {
       target = Math.min(ceiling, currentIntensity + buildStep);
       reason = `sarah_auto_gradual_build near=${prediction.nearClimax} recovery=${prediction.recovery}`;
     }
@@ -2386,7 +2397,9 @@ export default function LiveCapture() {
     hrConnected,
     hrTelemetry,
     prediction,
+    recordingActive,
     sendHowlControlCommand,
+    telemetryHistory,
   ]);
   const emgCalibrationSteps = useMemo(() => {
     if (!usingPerinealEmgConfig) return EMG_CALIBRATION_STEPS;
@@ -3591,6 +3604,16 @@ export default function LiveCapture() {
           </button>
           <button
             type="button"
+            onClick={sendHowlEmergencyStop}
+            disabled={howlControlBusy === "emergency_stop"}
+            className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg bg-destructive px-5 py-2 text-sm font-black uppercase tracking-wide text-destructive-foreground shadow-lg shadow-destructive/25 hover:bg-destructive/90 disabled:opacity-60"
+            aria-label="Immediately mute Howl and set both channels to zero"
+          >
+            <Square className="h-4 w-4 fill-current" />
+            {howlControlBusy === "emergency_stop" ? "Stopping Howl…" : "Stop Howl Now"}
+          </button>
+          <button
+            type="button"
             onClick={() => setFocusView(!focusView)}
             className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-border bg-muted px-3 py-2 text-sm font-semibold text-foreground hover:bg-muted/80"
           >
@@ -3665,6 +3688,18 @@ export default function LiveCapture() {
             loadMediaFiles(event.dataTransfer.files);
           }}
         >
+          {!mediaFullscreen && (
+            <button
+              type="button"
+              onClick={sendHowlEmergencyStop}
+              disabled={howlControlBusy === "emergency_stop"}
+              className="absolute bottom-4 right-4 z-20 inline-flex min-h-12 items-center gap-2 rounded-xl bg-destructive px-5 py-3 text-sm font-black uppercase tracking-wide text-destructive-foreground shadow-2xl shadow-black/60 hover:bg-destructive/90 disabled:opacity-60"
+              aria-label="Immediately mute Howl and set both channels to zero"
+            >
+              <Square className="h-4 w-4 fill-current" />
+              {howlControlBusy === "emergency_stop" ? "Stopping…" : "Stop Howl"}
+            </button>
+          )}
           {mediaVideo ? (
             <video
               ref={mediaVideoRef}
@@ -4438,7 +4473,7 @@ export default function LiveCapture() {
                           className="h-10 w-full rounded-lg border border-border bg-background px-3 text-sm"
                           type="number"
                           min="0"
-                          max="100"
+                          max="15"
                           value={howlControlForm.intensityCeiling}
                           onChange={(event) => updateHowlControlForm({ intensityCeiling: event.target.value }, { resetConnection: false })}
                         />
@@ -4549,9 +4584,9 @@ export default function LiveCapture() {
                         className="w-full accent-primary"
                         type="range"
                         min="0"
-                        max="100"
+                        max="15"
                         step="1"
-                        value={Math.max(0, Math.min(100, Number(howlControlForm.intensityCeiling) || 0))}
+                        value={Math.max(0, Math.min(15, Number(howlControlForm.intensityCeiling) || 0))}
                         onChange={(event) => updateHowlControlForm({ intensityCeiling: Number(event.target.value) }, { resetConnection: false })}
                       />
                     </label>

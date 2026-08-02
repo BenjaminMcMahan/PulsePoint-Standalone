@@ -59,6 +59,7 @@ const state = {
     url: HR_WS_URL,
     connected: false,
     recording: null,
+    obsRecordingActive: false,
     latestTelemetry: null,
     selectedSource: HR_SOURCE_IDS.HEART_RATE_ON_STREAM,
     selectedSourceLabel: HR_SOURCE_LABELS[HR_SOURCE_IDS.HEART_RATE_ON_STREAM],
@@ -1086,7 +1087,6 @@ function connectHrBridge() {
       if (msg.type === 'recording_info') {
         state.hr.recording = msg.recording || null;
         if (state.hr.recording?.active) {
-          ensureLiveSession(state.hr.recording);
           if (state.hr.selectedSource === HR_SOURCE_IDS.PULSOID && !pulsoidRecording) {
             createPulsoidRecording(state.hr.recording, 'pulsoid_recording_info').catch((error) => {
               state.hr.pulsoid.error = `Pulsoid CSV start failed: ${error.message || error}`;
@@ -1106,6 +1106,7 @@ function connectHrBridge() {
       }
 
       if (msg.type === 'obs_record_state') {
+        state.hr.obsRecordingActive = !!msg.active;
         state.hr.recording = {
           ...(state.hr.recording || {}),
           active: !!msg.active,
@@ -1449,6 +1450,10 @@ liveCaptureRouter.post('/refresh-files', async (_req, res) => {
 });
 
 liveCaptureRouter.post('/ensure-session', (req, res) => {
+  if (!state.hr.obsRecordingActive || !state.hr.recording?.active) {
+    res.status(409).json({ error: 'A live record is created only while OBS is actively recording.' });
+    return;
+  }
   const sessionId = ensureLiveSession(req.body?.recording || state.hr.recording || {}, {
     captureKind: req.body?.captureKind,
   });

@@ -63,8 +63,8 @@ export const HOWL_CONTROL_DEFAULT_LIMITS = Object.freeze({
   manualOverrideRequired: true,
   emergencyStopRequired: true,
   intensityFloor: 0,
-  intensityCeiling: 20,
-  rampRateLimitPerSecond: 5,
+  intensityCeiling: 10,
+  rampRateLimitPerSecond: 2,
 });
 
 export function normalizeHowlTelemetrySample(input = {}) {

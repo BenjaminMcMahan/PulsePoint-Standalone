@@ -1,7 +1,7 @@
 {
   "name": "sarah-standalone",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "main": "desktop/main.cjs",
   "scripts": {
@@ -19,6 +19,8 @@
     "desktop:pack": "npm run build && npm run desktop:prepare-node && node desktop/package-win-unpacked.mjs",
     "desktop:dist": "npm run desktop:dist:win",
     "desktop:dist:win": "npm run desktop:pack",
+    "desktop:installer:win": "npm run build && npm run desktop:prepare-node && electron-builder --win nsis --x64 --publish never",
+    "desktop:dist:linux": "npm run build && npm run desktop:prepare-node && electron-builder --linux AppImage --x64 --publish never",
     "android:sync": "npm run build && cap sync android",
     "android:open": "npm run android:sync && cap open android",
     "android:apk:debug": "npm run android:sync && cd android && gradlew.bat assembleDebug",
@@ -64,6 +66,12 @@
       ],
       "icon": "public/icons/sarah-512.png",
       "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "linux": {
+      "target": ["AppImage"],
+      "category": "Utility",
+      "icon": "public/icons/sarah-512.png",
+      "artifactName": "${productName}-${version}-linux-${arch}.${ext}"
     },
     "nsis": {
       "oneClick": false,
