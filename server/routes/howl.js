@@ -6,6 +6,8 @@ import { HOWL_CONTROL_DEFAULT_LIMITS, normalizeHowlTelemetrySample } from '../se
 export const howlRouter = express.Router();
 
 const SETTINGS_ID = 'default';
+const HOWL_HARD_INTENSITY_CEILING = 15;
+const HOWL_HARD_MAX_UPWARD_STEP = 2;
 const DEFAULT_SETTINGS = Object.freeze({
   id: SETTINGS_ID,
   controlEnabled: false,
@@ -178,9 +180,9 @@ function getSettings() {
     remoteAccessKey: String(saved.remoteAccessKey || envKey || '').trim(),
     controlEnabled: Boolean(saved.controlEnabled),
     sarahAutoEnabled: Boolean(saved.sarahAutoEnabled),
-    intensityFloor: clampNumber(saved.intensityFloor, 0, 100, DEFAULT_SETTINGS.intensityFloor),
-    intensityCeiling: clampNumber(saved.intensityCeiling, 0, 100, DEFAULT_SETTINGS.intensityCeiling),
-    rampRateLimitPerSecond: clampNumber(saved.rampRateLimitPerSecond, 0, 100, DEFAULT_SETTINGS.rampRateLimitPerSecond),
+    intensityFloor: clampNumber(saved.intensityFloor, 0, HOWL_HARD_INTENSITY_CEILING, DEFAULT_SETTINGS.intensityFloor),
+    intensityCeiling: clampNumber(saved.intensityCeiling, 0, HOWL_HARD_INTENSITY_CEILING, DEFAULT_SETTINGS.intensityCeiling),
+    rampRateLimitPerSecond: clampNumber(saved.rampRateLimitPerSecond, 0, HOWL_HARD_MAX_UPWARD_STEP, DEFAULT_SETTINGS.rampRateLimitPerSecond),
   };
 }
 
@@ -193,9 +195,9 @@ function saveSettings(input = {}) {
     dispatchMode: ['queue', 'direct_http', 'queue_and_direct'].includes(input.dispatchMode) ? input.dispatchMode : previous.dispatchMode,
     controlUrl: normalizeHowlBaseUrl(input.controlUrl ?? previous.controlUrl ?? ''),
     remoteAccessKey: cleanText(input.remoteAccessKey ?? previous.remoteAccessKey ?? '', 300),
-    intensityFloor: clampNumber(input.intensityFloor, 0, 100, previous.intensityFloor),
-    intensityCeiling: clampNumber(input.intensityCeiling, 0, 100, previous.intensityCeiling),
-    rampRateLimitPerSecond: clampNumber(input.rampRateLimitPerSecond, 0, 100, previous.rampRateLimitPerSecond),
+    intensityFloor: clampNumber(input.intensityFloor, 0, HOWL_HARD_INTENSITY_CEILING, previous.intensityFloor),
+    intensityCeiling: clampNumber(input.intensityCeiling, 0, HOWL_HARD_INTENSITY_CEILING, previous.intensityCeiling),
+    rampRateLimitPerSecond: clampNumber(input.rampRateLimitPerSecond, 0, HOWL_HARD_MAX_UPWARD_STEP, previous.rampRateLimitPerSecond),
     buildRampEnabled: input.buildRampEnabled !== false,
     nearClimaxReductionEnabled: input.nearClimaxReductionEnabled !== false,
     recoveryReductionEnabled: input.recoveryReductionEnabled !== false,
@@ -375,6 +377,24 @@ async function dispatchCommand(command, settings) {
           previousPower: currentPower,
           targetPower,
         };
+      } else if (['set_power', 'set_intensity', 'set_state'].includes(command.action) && command.intensity != null) {
+        const channels = command.channel === 'all' ? [0, 1] : [channelIndex(command.channel)];
+        const status = await requestHowl(settings, '/status', {});
+        const maxStep = Math.min(HOWL_HARD_MAX_UPWARD_STEP, Math.max(0, settings.rampRateLimitPerSecond));
+        const targets = channels.map((channel) => {
+          const current = powerFromStatus(status.data, channel);
+          return {
+            channel,
+            current,
+            target: command.intensity > current
+              ? Math.min(command.intensity, current + maxStep, settings.intensityCeiling, HOWL_HARD_INTENSITY_CEILING)
+              : Math.max(settings.intensityFloor, command.intensity),
+          };
+        });
+        const body = {};
+        for (const target of targets) Object.assign(body, setPowerBody(target.channel, target.target));
+        const powerResult = await requestHowl(settings, '/set_power', body);
+        result = { ...powerResult, requestedPower: command.intensity, appliedTargets: targets };
       } else {
         const request = directHowlRequestForCommand(command);
         result = await requestHowl(settings, request.endpoint, request.body);
@@ -546,7 +566,9 @@ howlRouter.post('/control', async (req, res) => {
 });
 
 howlRouter.post('/control/emergency-stop', async (req, res) => {
-  const settings = { ...getSettings(), controlEnabled: true };
+  const previousSettings = getSettings();
+  const settings = { ...previousSettings, controlEnabled: true, sarahAutoEnabled: false };
+  upsertEntity('HowlControlSettings', SETTINGS_ID, { ...previousSettings, sarahAutoEnabled: false });
   const command = normalizeControlCommand({
     ...(req.body || {}),
     action: 'emergency_stop',
