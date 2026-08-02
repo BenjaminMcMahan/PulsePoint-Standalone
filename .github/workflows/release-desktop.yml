@@ -1,4 +1,4 @@
-name: Build and release Sarah desktop
+name: Build and release Sarah
 
 on:
   push:
@@ -49,8 +49,37 @@ jobs:
           name: linux-desktop
           path: desktop-release/Sarah-*-linux-x86_64.AppImage
 
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run android:sync
+      - name: Build installable debug APK
+        working-directory: android
+        run: |
+          chmod +x ./gradlew
+          ./gradlew assembleDebug --no-daemon
+      - name: Name APK for the release
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk "Sarah-$(node -p \"require('./package.json').version\")-android.apk"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: Sarah-*-android.apk
+
   release:
-    needs: [windows, linux]
+    needs: [windows, linux, android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -62,8 +91,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         run: |
-          gh release create "$RELEASE_TAG" artifacts/* \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "Sarah ${RELEASE_TAG#v} — Live Capture Safety" \
-            --generate-notes \
-            --latest
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" artifacts/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$RELEASE_TAG" artifacts/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Sarah ${RELEASE_TAG#v} — Live Capture Safety" \
+              --generate-notes \
+              --latest
+          fi
